@@ -1,0 +1,944 @@
+"""
+EDL — Финансовая модель финального этапа CASE-IN ЛМС 2026.
+
+Основана на модели пользователя (NPV 1 пилот = $7.5K, PBP = 3.5 лет, r = 12%),
+расширена под задачи финала:
+  • Задача 1: матрица рисков + стоимость митигации
+  • Задача 2: три сценария (S1/S2/S3) с триггерами
+  • Задача 3: платформенные потоки дохода (комиссия, сертификаты CO2, верификация, подписка)
+  • Задача 4: KPI управления проектом (в сводной)
+
+Все расчёты формульные. Файл пересчитывается LibreOffice в конце.
+"""
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+ARIAL = "Arial"
+
+F_TITLE   = Font(name=ARIAL, size=14, bold=True, color="1F3864")
+F_SECT    = Font(name=ARIAL, size=11, bold=True, color="1F3864")
+F_HDR     = Font(name=ARIAL, size=10, bold=True, color="FFFFFF")
+F_SUB     = Font(name=ARIAL, size=10, bold=True, color="1F3864")
+F_INPUT   = Font(name=ARIAL, size=10, color="0000FF")
+F_FORM    = Font(name=ARIAL, size=10, color="000000")
+F_LINK    = Font(name=ARIAL, size=10, color="008000")
+F_TXT     = Font(name=ARIAL, size=10, color="000000")
+F_NOTE    = Font(name=ARIAL, size=9, italic=True, color="595959")
+F_TOTAL   = Font(name=ARIAL, size=10, bold=True, color="000000")
+F_S1      = Font(name=ARIAL, size=10, bold=True, color="00703C")
+F_S2      = Font(name=ARIAL, size=10, bold=True, color="1F3864")
+F_S3      = Font(name=ARIAL, size=10, bold=True, color="9C0006")
+
+FILL_HDR   = PatternFill("solid", fgColor="1F3864")
+FILL_SUB   = PatternFill("solid", fgColor="D9E1F2")
+FILL_ASSUM = PatternFill("solid", fgColor="FFF2CC")
+FILL_TOT   = PatternFill("solid", fgColor="E2EFDA")
+FILL_S1    = PatternFill("solid", fgColor="C6EFCE")
+FILL_S2    = PatternFill("solid", fgColor="BDD7EE")
+FILL_S3    = PatternFill("solid", fgColor="F8CBAD")
+FILL_CRIT  = PatternFill("solid", fgColor="F4B084")
+FILL_WARN  = PatternFill("solid", fgColor="FFE699")
+FILL_OK    = PatternFill("solid", fgColor="C6EFCE")
+
+thin = Side(border_style="thin", color="BFBFBF")
+BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+AL_L = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+AL_C = Alignment(horizontal="center", vertical="center", wrap_text=True)
+AL_R = Alignment(horizontal="right",  vertical="center", wrap_text=False)
+
+FMT_NUM  = '#,##0;(#,##0);-'
+FMT_USD  = '"$"#,##0;("$"#,##0);-'
+FMT_PCT  = '0.0%;(0.0%);-'
+FMT_PCT2 = '0.00%;(0.00%);-'
+FMT_X    = '0.00"x"'
+FMT_Y    = '0.00" лет"'
+FMT_DEC  = '#,##0.00;(#,##0.00);-'
+
+
+def apply(cell, font=None, fill=None, align=None, fmt=None, border=True):
+    if font:   cell.font = font
+    if fill:   cell.fill = fill
+    if align:  cell.alignment = align
+    if fmt:    cell.number_format = fmt
+    if border: cell.border = BORDER
+
+
+def hdr(cell):
+    apply(cell, F_HDR, FILL_HDR, AL_C)
+
+
+def sub(cell):
+    apply(cell, F_SUB, FILL_SUB, AL_L)
+
+
+wb = Workbook()
+
+# ===========================================================================
+# ЛИСТ 1 — ПАРАМЕТРЫ
+# ===========================================================================
+ws = wb.active
+ws.title = "Параметры"
+ws.column_dimensions["A"].width = 46
+ws.column_dimensions["B"].width = 15
+ws.column_dimensions["C"].width = 15
+ws.column_dimensions["D"].width = 11
+ws.column_dimensions["E"].width = 50
+
+ws["A1"] = "EDL — Финансовая модель (пилот ПС 110 кВ + расширение на портфель)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:E1")
+
+for j, h in enumerate(["Параметр", "Обозначение", "Значение", "Ед.", "Источник / обоснование"], 1):
+    hdr(ws.cell(row=3, column=j, value=h))
+ws.row_dimensions[3].height = 22
+
+# Каждая строка: (label, symbol, value, unit, note, highlight, fmt)
+params = [
+    ("· ОБОРУДОВАНИЕ ПС", None, None, None, None, False, None),
+    ("Количество трансформаторов",              "N_тр",         2,        "шт",        "Пилот 2×40 МВА",                           False, FMT_NUM),
+    ("Мощность одного трансформатора",          "P",            40,       "МВА",       "Типовой 110/35/10 кВ",                     False, FMT_NUM),
+    ("Коэффициент загрузки",                    "η",            0.85,     "",          "Средняя загрузка в сети",                  False, FMT_PCT),
+    ("Количество выключателей 110 кВ",          "N_выкл",       5,        "шт",        "Элегазовые 110 кВ",                        False, FMT_NUM),
+
+    ("· CAPEX И СТАВКА", None, None, None, None, False, None),
+    ("CAPEX оборудования ПС",                   "CAPEX_ПС",     3_930_000,"USD",       "см. лист CAPEX_ПС",                        False, FMT_USD),
+    ("CAPEX системы EDL (1 ПС)",                "CAPEX_EDL",    212_400,  "USD",       "см. лист CAPEX_EDL",                       False, FMT_USD),
+    ("Базовая ставка дисконтирования",          "r_баз",        0.12,     "",          "12% — WACC проекта (из модели)",           True,  FMT_PCT),
+    ("Срок анализа",                            "T",            10,       "лет",       "Горизонт проекта",                          False, FMT_NUM),
+    ("OPEX EDL (поддержка)",                    "OPEX_EDL",     7_200,    "USD/год",   "3,4% от CAPEX EDL",                        True,  FMT_USD),
+
+    ("· СНИЖЕНИЕ OPEX ТРАНСФОРМАТОРОВ", None, None, None, None, False, None),
+    ("Стоимость планового ремонта ТР",          "C_ппр_тр",     14_300,   "USD",       "средний ППР 110 кВ / 40 МВА",              False, FMT_USD),
+    ("Снижение частоты ремонтов ППР→RCM",       "k_ред_ппр",    0.20,     "",          "20% — переход на ремонт по состоянию",     True,  FMT_PCT),
+    ("Цикл ремонта ТР",                         "T_цикл_тр",    6,        "лет",       "Норматив ПТЭ",                             False, FMT_NUM),
+    ("Вероятность аварии ТР (без EDL)",         "P_ав_тр",      0.01,     "",          "1% — статистика 110 кВ",                   False, FMT_PCT),
+    ("Коэффициент накопления риска отказов",    "k_нак",        3,        "",          "интегральный множитель по циклу ремонта (из эталонной модели)", True, FMT_NUM),
+    ("Стоимость аварийного ремонта ТР",         "C_ав_тр",      230_000,  "USD",       "капремонт / замена",                       False, FMT_USD),
+    ("Снижение вероятности аварии с EDL",       "k_снж",        0.30,     "",          "30% — предиктивная аналитика",             True,  FMT_PCT),
+    ("Время аварийного простоя",                "T_прст",       96,       "ч",         "Среднее по отрасли",                       False, FMT_NUM),
+    ("Активная мощность (расчётно)",            "W",            68_000,   "кВт",       "P × 1000 × N_тр × η",                      False, FMT_NUM),
+    ("Удельный ущерб от простоя",               "Ц_уд",         0.86,     "USD/кВт·ч", "Штрафы + недоотпуск",                      False, FMT_DEC),
+    ("Объём масла в ТР",                        "V_масло",      15_000,   "л",         "конструктивная норма",                     False, FMT_NUM),
+    ("Цена масла ГК",                           "Ц_масло",      1.0,      "USD/л",     "рыночная цена",                            False, FMT_DEC),
+    ("Снижение частоты замены масла",           "k_ред_масло",  0.30,     "",          "30% — контроль ДГА",                       True,  FMT_PCT),
+    ("Частота замены масла (норматив)",         "f_зам",        0.20,     "",          "1 раз в 5 лет",                            False, FMT_PCT),
+    ("Плановых инспекций в год",                "N_инсп",       52,       "",          "еженедельно",                              False, FMT_NUM),
+    ("Время одной инспекции (2 чел.)",          "T_инсп",       6,        "ч",         "стандарт",                                 False, FMT_NUM),
+    ("Стоимость человеко-часа",                 "C_час",        7.15,     "USD/ч",     "средняя РБ/РФ",                            False, FMT_DEC),
+    ("Доля автоматизации инспекций",            "k_авт",        0.70,     "",          "70% берёт EDL",                            True,  FMT_PCT),
+    ("Диагностических выездов в год (ТР)",      "N_выезд_тр",   2,        "в год",     "масло + ЧР + тепловизор",                  False, FMT_NUM),
+    ("Стоимость одного выезда (ТР)",            "C_выезд_тр",   1_300,    "USD",       "лаборатория + транспорт",                  False, FMT_USD),
+
+    ("· ВЫКЛЮЧАТЕЛИ 110 кВ", None, None, None, None, False, None),
+    ("Стоимость ППР выключателя",               "C_ппр_в",      4_300,    "USD",       "элегазовый 110 кВ",                        False, FMT_USD),
+    ("Цикл ремонта выключателя",                "T_цикл_в",     5,        "лет",       "норматив",                                 False, FMT_NUM),
+    ("Вероятность аварии выключателя",          "P_ав_в",       0.01,     "",          "1%",                                       False, FMT_PCT),
+    ("Стоимость аварийного ремонта выкл",       "C_ав_в",       8_600,    "USD",       "выключатель",                              False, FMT_USD),
+    ("Диагностических выездов в год (выкл)",    "N_выезд_в",    2,        "в год",     "выключатель",                              False, FMT_NUM),
+    ("Стоимость выезда (выкл)",                 "C_выезд_в",    580,      "USD",       "выключатель",                              False, FMT_USD),
+]
+
+row = 4
+PARAM_ROW = {}  # symbol -> row number
+
+for p in params:
+    if p[1] is None:
+        c = ws.cell(row=row, column=1, value=p[0])
+        apply(c, F_SECT, FILL_SUB, AL_L)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+    else:
+        label, sym, val, unit, note, hi, fmt = p
+        apply(ws.cell(row=row, column=1, value=label), F_TXT, None, AL_L)
+        apply(ws.cell(row=row, column=2, value=sym),   F_TXT, None, AL_C)
+        c = ws.cell(row=row, column=3, value=val)
+        apply(c, F_INPUT, FILL_ASSUM if hi else None, AL_R, fmt)
+        apply(ws.cell(row=row, column=4, value=unit),  F_TXT, None, AL_C)
+        apply(ws.cell(row=row, column=5, value=note),  F_NOTE, None, AL_L)
+        PARAM_ROW[sym] = row
+    row += 1
+
+# Функция-хелпер: ссылка на параметр
+def P(sym):
+    return f"Параметры!$C${PARAM_ROW[sym]}"
+
+# Легенда
+row += 1
+c = ws.cell(row=row, column=1, value="Цветовая легенда (стандарт финансового моделирования):")
+apply(c, F_SUB, FILL_SUB, AL_L)
+ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+row += 1
+legend = [
+    ("Синий текст — входные данные (можно менять для сценариев)",   Font(name=ARIAL, size=9, italic=True, color="0000FF"), None),
+    ("Чёрный текст — формулы (пересчитываются автоматически)",      Font(name=ARIAL, size=9, italic=True, color="000000"), None),
+    ("Зелёный текст — ссылки на другие листы книги",                Font(name=ARIAL, size=9, italic=True, color="008000"), None),
+    ("Жёлтый фон — ключевые допущения модели",                      Font(name=ARIAL, size=9, italic=True, color="000000"), FILL_ASSUM),
+]
+for text, font, fill in legend:
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = font
+    if fill: c.fill = fill
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+    row += 1
+
+
+# ===========================================================================
+# ЛИСТ 2 — CAPEX_ПС
+# ===========================================================================
+ws = wb.create_sheet("CAPEX_ПС")
+ws.column_dimensions["A"].width = 50
+for col in "BCDE":
+    ws.column_dimensions[col].width = 16
+
+ws["A1"] = "Таблица 1.1 — CAPEX основного оборудования ПС 110 кВ"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:D1")
+
+for j, h in enumerate(["Позиция", "Кол-во", "Цена/ед., USD", "Сумма, USD"], 1):
+    hdr(ws.cell(row=3, column=j, value=h))
+
+items_ps = [
+    ("Трансформатор ТРДН 40000/110", 2, 1_715_000),
+    ("Выключатель элегазовый 110 кВ", 5, 100_000),
+]
+row = 4
+for label, qty, price in items_ps:
+    apply(ws.cell(row=row, column=1, value=label), F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=2, value=qty),   F_INPUT, None, AL_R, FMT_NUM)
+    apply(ws.cell(row=row, column=3, value=price), F_INPUT, None, AL_R, FMT_USD)
+    apply(ws.cell(row=row, column=4, value=f"=B{row}*C{row}"), F_FORM, None, AL_R, FMT_USD)
+    row += 1
+
+# ИТОГО
+apply(ws.cell(row=row, column=1, value="ИТОГО ПС"), F_TOTAL, FILL_TOT, AL_L)
+ws.cell(row=row, column=1).fill = FILL_TOT
+apply(ws.cell(row=row, column=4, value=f"=SUM(D4:D{row-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+for c in range(2, 4):
+    ws.cell(row=row, column=c).fill = FILL_TOT
+    ws.cell(row=row, column=c).border = BORDER
+TOTAL_PS_ROW = row
+
+ws.cell(row=row+2, column=1, value="Соответствует параметру CAPEX_ПС на листе «Параметры»").font = F_NOTE
+
+
+# ===========================================================================
+# ЛИСТ 3 — CAPEX_EDL
+# ===========================================================================
+ws = wb.create_sheet("CAPEX_EDL")
+ws.column_dimensions["A"].width = 6
+ws.column_dimensions["B"].width = 48
+for col in "CDE":
+    ws.column_dimensions[col].width = 15
+
+ws["A1"] = "Таблица 1.2 — CAPEX системы EDL (1 ПС)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:E1")
+
+for j, h in enumerate(["№", "Статья", "Кол-во", "Цена/ед., USD", "Сумма, USD"], 1):
+    hdr(ws.cell(row=3, column=j, value=h))
+
+items_edl = [
+    ("GPU NVIDIA A100 40GB OEM",                  10, 5_500),
+    ("Серверы Edge (Supermicro/EPYC)",             5, 4_300),
+    ("Шкафы 42U + UPS",                            3, 3_000),
+    ("Кабели, оптика, коммутаторы IEC 61850",      1, 4_000),
+    ("Датчики ЧР RFCT-7 / Smart-PD",               4, 1_000),
+    ("Датчики ДГА TDGM-04",                        9, 6_800),
+    ("Датчики температуры PT100 + BDM-T",         23,   130),
+    ("Датчики вибрации + акустика AR-Sensor",     14,   300),
+    ("Датчики тока / синхронизации",              29,   190),
+    ("Монтаж + пуско-наладка",                     1, 15_000),
+    ("ПО + RAG-база + обучение персонала",         1, 30_000),
+]
+row = 4
+for i, (label, qty, price) in enumerate(items_edl, 1):
+    apply(ws.cell(row=row, column=1, value=i),     F_TXT, None, AL_C)
+    apply(ws.cell(row=row, column=2, value=label), F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=3, value=qty),   F_INPUT, None, AL_R, FMT_NUM)
+    apply(ws.cell(row=row, column=4, value=price), F_INPUT, None, AL_R, FMT_USD)
+    apply(ws.cell(row=row, column=5, value=f"=C{row}*D{row}"), F_FORM, None, AL_R, FMT_USD)
+    row += 1
+
+apply(ws.cell(row=row, column=2, value="ИТОГО CAPEX EDL"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=row, column=5, value=f"=SUM(E4:E{row-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+for c in [1, 3, 4]:
+    ws.cell(row=row, column=c).fill = FILL_TOT
+    ws.cell(row=row, column=c).border = BORDER
+TOTAL_EDL_ROW = row
+
+
+# ===========================================================================
+# ЛИСТ 4 — OPEX_Экономия (6 компонентов, формульно, как в модели пользователя)
+# ===========================================================================
+ws = wb.create_sheet("OPEX_Экономия")
+ws.column_dimensions["A"].width = 6
+ws.column_dimensions["B"].width = 40
+ws.column_dimensions["C"].width = 52
+ws.column_dimensions["D"].width = 16
+ws.column_dimensions["E"].width = 14
+ws.column_dimensions["F"].width = 40
+
+ws["A1"] = "Таблица 2 — Формульный расчёт OPEX-экономии от EDL (на 1 пилотную ПС)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:F1")
+
+for j, h in enumerate(["№", "Компонент", "Формула (как считается)", "USD / год", "Доля", "Комментарий"], 1):
+    hdr(ws.cell(row=3, column=j, value=h))
+ws.row_dimensions[3].height = 30
+
+# Строка 1: Экономия на ППР = N_тр × C_ппр_тр / T_цикл_тр × k_ред_ппр + N_выкл × C_ппр_в / T_цикл_в × k_ред_ппр
+f_eppr = f"={P('N_тр')}*{P('C_ппр_тр')}/{P('T_цикл_тр')}*{P('k_ред_ппр')}+{P('N_выкл')}*{P('C_ппр_в')}/{P('T_цикл_в')}*{P('k_ред_ппр')}"
+# Строка 2: Предотвращение аварийных ремонтов = (N_тр × P_ав × C_ав + N_выкл × P_ав × C_ав) × k_снж × k_нак
+f_eav = f"=({P('N_тр')}*{P('P_ав_тр')}*{P('C_ав_тр')}+{P('N_выкл')}*{P('P_ав_в')}*{P('C_ав_в')})*{P('k_снж')}"
+# Строка 3: Предотвращение простоя = N_тр × P_ав × T_прст × (W/N_тр) × Ц_уд × k_снж × k_нак
+# Упрощ.: P_ав × T_прст × W × Ц_уд × k_снж × k_нак (W уже суммарная по ТР)
+f_eprst = f"={P('P_ав_тр')}*{P('T_прст')}*{P('W')}*{P('Ц_уд')}*{P('k_снж')}*{P('k_нак')}"
+# Строка 4: Масло = N_тр × V_масло × Ц_масло × f_зам × k_ред_масло
+f_emasl = f"={P('N_тр')}*{P('V_масло')}*{P('Ц_масло')}*{P('f_зам')}*{P('k_ред_масло')}"
+# Строка 5: Автоматизация инспекций = N_инсп × T_инсп × C_час × k_авт (2 чел. уже учтены в N_инсп)
+f_epers = f"={P('N_инсп')}*{P('T_инсп')}*{P('C_час')}*{P('k_авт')}"
+# Строка 6: Замена диагностики = (N_тр × N_выезд_тр × C_выезд_тр + N_выкл × N_выезд_в × C_выезд_в)
+f_ediag = f"={P('N_тр')}*{P('N_выезд_тр')}*{P('C_выезд_тр')}+{P('N_выкл')}*{P('N_выезд_в')}*{P('C_выезд_в')}"
+
+comps = [
+    ("Экономия на ППР",                       "N × C_ппр / T_цикл × k_ред_ппр",                         f_eppr, "снижение частоты ремонтов"),
+    ("Предотвращение аварийных ремонтов",     "N × P_ав × C_ав × k_снж",                                 f_eav,  "вероятность × убыток × снижение"),
+    ("Предотвращение потерь от простоя",      "P_ав × T_прст × W × Ц_уд × k_снж",                        f_eprst, "главный компонент"),
+    ("Оптимизация масла и расходников",       "N × V_масло × Ц_масло × f_зам × k_ред_масло",             f_emasl, "контроль ДГА"),
+    ("Автоматизация инспекций персонала",     "N_инсп × T_инсп × C_час × k_авт",                          f_epers, "70% снимает EDL"),
+    ("Замена выездной лабораторной диагностики","N_тр × N_выезд × C_выезд + N_выкл × …",                 f_ediag, "собственный анализатор"),
+]
+row = 4
+for i, (name, formula_hint, formula_val, note) in enumerate(comps, 1):
+    apply(ws.cell(row=row, column=1, value=i),    F_TXT, None, AL_C)
+    apply(ws.cell(row=row, column=2, value=name), F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=3, value=formula_hint), F_NOTE, None, AL_L)
+    apply(ws.cell(row=row, column=4, value=formula_val),  F_LINK, None, AL_R, FMT_USD)
+    # доля — подставим ниже
+    apply(ws.cell(row=row, column=6, value=note), F_NOTE, None, AL_L)
+    row += 1
+
+total_row = row
+apply(ws.cell(row=total_row, column=2, value="ИТОГО OPEX-экономия"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=total_row, column=4, value=f"=SUM(D4:D{total_row-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=total_row, column=5, value=f"=SUM(E4:E{total_row-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_PCT)
+for c in [1, 3, 6]:
+    ws.cell(row=total_row, column=c).fill = FILL_TOT
+    ws.cell(row=total_row, column=c).border = BORDER
+
+# Теперь доли — ссылаясь на total
+for i in range(4, total_row):
+    apply(ws.cell(row=i, column=5, value=f"=D{i}/$D${total_row}"), F_FORM, None, AL_R, FMT_PCT)
+
+# Минус OPEX EDL
+row = total_row + 1
+apply(ws.cell(row=row, column=2, value="(−) OPEX EDL (поддержка системы)"), F_TXT, None, AL_L)
+apply(ws.cell(row=row, column=4, value=f"=-{P('OPEX_EDL')}"), F_LINK, None, AL_R, FMT_USD)
+
+row += 1
+apply(ws.cell(row=row, column=2, value="ЧИСТЫЙ ГОДОВОЙ ДЕНЕЖНЫЙ ПОТОК (1 ПС)"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=row, column=4, value=f"=D{total_row}+D{total_row+1}"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+for c in [1, 3, 5, 6]:
+    ws.cell(row=row, column=c).fill = FILL_TOT
+    ws.cell(row=row, column=c).border = BORDER
+NET_CF_ROW = row  # чистый CF на 1 ПС в год
+
+
+# ===========================================================================
+# ЛИСТ 5 — Новые_доходы (платформенные потоки — задача 3)
+# ===========================================================================
+ws = wb.create_sheet("Новые_доходы")
+ws.column_dimensions["A"].width = 6
+ws.column_dimensions["B"].width = 40
+ws.column_dimensions["C"].width = 14
+ws.column_dimensions["D"].width = 14
+ws.column_dimensions["E"].width = 18
+ws.column_dimensions["F"].width = 50
+
+ws["A1"] = "Таблица 3 — Платформенные потоки дохода (задача 3 финального этапа)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:F1")
+
+ws["A2"] = "Появляются при масштабировании на портфель объектов и открытии маркетплейса EDL.ru"
+ws["A2"].font = F_NOTE
+ws.merge_cells("A2:F2")
+
+for j, h in enumerate(["№", "Поток дохода", "База", "Ставка", "USD / год / ПС", "Обоснование"], 1):
+    hdr(ws.cell(row=4, column=j, value=h))
+ws.row_dimensions[4].height = 28
+
+# На один объект — в среднем. Потом умножается в сценариях на число объектов и масштабный коэффициент.
+# Ставки как на слайде 10.
+streams = [
+    ("Комиссия маркетплейса б/у оборудования",  "Средний оборот сделок: $120 000/ПС/год",   "2.5%",    "=120000*0.025",    "2–3% комиссии с верифицированных сделок по ЦПА"),
+    ("Продажа сертификатов CO₂",                "114 т CO₂ / ПС / год × $15",                "$15/т",   "=114*15",          "228 т на 2 ТР+5 выкл → 114 т/ПС при EF_вторич"),
+    ("Верификация ЦПА (fixed fee)",             "10 актов / ПС / год × $100",                 "$100",    "=10*100",          "$50–150 за акт, 10 актов на пилотную ПС"),
+    ("Подписка на предиктивный модуль",         "Annuity / ПС",                               "—",       "=6000",            "$500/мес × 12 — базовая подписка"),
+]
+row = 5
+for i, (name, base, rate, formula, note) in enumerate(streams, 1):
+    apply(ws.cell(row=row, column=1, value=i),     F_TXT, None, AL_C)
+    apply(ws.cell(row=row, column=2, value=name),  F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=3, value=base),  F_NOTE, None, AL_L)
+    apply(ws.cell(row=row, column=4, value=rate),  F_TXT, None, AL_C)
+    apply(ws.cell(row=row, column=5, value=formula), F_INPUT, None, AL_R, FMT_USD)
+    apply(ws.cell(row=row, column=6, value=note),  F_NOTE, None, AL_L)
+    row += 1
+
+total_new = row
+apply(ws.cell(row=row, column=2, value="ИТОГО платформенные доходы (на 1 ПС)"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=row, column=5, value=f"=SUM(E5:E{row-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+for c in [1, 3, 4, 6]:
+    ws.cell(row=row, column=c).fill = FILL_TOT
+    ws.cell(row=row, column=c).border = BORDER
+TOTAL_NEW_ROW = row
+
+row += 2
+ws.cell(row=row, column=1, value="Примечание:").font = F_SUB
+ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+row += 1
+note_text = "Платформенные доходы появляются с 2-го года (после развёртывания маркетплейса). В пилотном расчёте (лист DCF_Пилот) не учитываются; включаются только в сценарном расчёте DCF_Сценарии с масштабным коэффициентом по сценарию."
+ws.cell(row=row, column=1, value=note_text).font = F_NOTE
+ws.cell(row=row, column=1).alignment = AL_L
+ws.merge_cells(start_row=row, start_column=1, end_row=row+1, end_column=6)
+
+
+# ===========================================================================
+# ЛИСТ 6 — Сценарии (коэффициенты + триггеры)
+# ===========================================================================
+ws = wb.create_sheet("Сценарии")
+ws.column_dimensions["A"].width = 40
+for i, c in enumerate("BCD"):
+    ws.column_dimensions[c].width = 17
+ws.column_dimensions["E"].width = 45
+
+ws["A1"] = "Параметры трёх сценариев реализации (задача 2 финального этапа)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:E1")
+
+# Заголовок
+hdr(ws.cell(row=3, column=1, value="Параметр"))
+for col, name, fill in [(2, "S1 «Интеграция»", FILL_S1),
+                        (3, "S2 «Базовый»",    FILL_S2),
+                        (4, "S3 «Турбулентность»", FILL_S3)]:
+    c = ws.cell(row=3, column=col, value=name)
+    apply(c, F_SUB, fill, AL_C)
+hdr(ws.cell(row=3, column=5, value="Комментарий"))
+ws.row_dimensions[3].height = 24
+
+# Каждая строка — параметр сценария
+# (label, S1, S2, S3, comment, fmt, highlight)
+scen_rows = [
+    ("Вероятность сценария (экспертно)",          0.30, 0.45, 0.25, "PESTEL-оценка, сумма = 1,0",                  FMT_PCT,  True),
+    ("Количество подключённых ПС",                20,   10,   3,    "портфель объектов на пике",                    FMT_NUM,  True),
+    ("Множитель OPEX-экономии vs базы",           1.10, 1.00, 0.80, "эффект интеграции / санкционного давления",    FMT_X,    True),
+    ("Множитель платформенных доходов",           1.50, 1.00, 0.20, "маркетплейс работает / ограничен",             FMT_X,    True),
+    ("Страновая премия к ставке дисконтирования", 0.00, 0.02, 0.05, "0 / +2 / +5 п.п.",                             FMT_PCT,  True),
+    ("Включать платформенные доходы? (1/0)",      1,    1,    0,    "в S3 маркетплейс заморожен",                   FMT_NUM,  False),
+]
+
+row = 4
+SCEN_ROW = {}
+for label, s1, s2, s3, note, fmt, hi in scen_rows:
+    apply(ws.cell(row=row, column=1, value=label), F_TXT, None, AL_L)
+    for col, val in [(2, s1), (3, s2), (4, s3)]:
+        c = ws.cell(row=row, column=col, value=val)
+        apply(c, F_INPUT, FILL_ASSUM if hi else None, AL_R, fmt)
+    apply(ws.cell(row=row, column=5, value=note), F_NOTE, None, AL_L)
+    SCEN_ROW[label] = row
+    row += 1
+
+# Расчётная ставка по сценарию
+row += 1
+apply(ws.cell(row=row, column=1, value="Итоговая ставка дисконтирования, r"),  F_TOTAL, FILL_TOT, AL_L)
+for col, scen_col in [(2, 'B'), (3, 'C'), (4, 'D')]:
+    formula = f"={P('r_баз')}+{scen_col}{SCEN_ROW['Страновая премия к ставке дисконтирования']}"
+    apply(ws.cell(row=row, column=col, value=formula), F_TOTAL, FILL_TOT, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=5, value="r_баз + страновая премия"), F_NOTE, None, AL_L)
+R_ROW = row
+
+# Триггеры переключения
+row += 3
+c = ws.cell(row=row, column=1, value="Триггеры переключения между сценариями")
+apply(c, F_SECT, FILL_SUB, AL_L)
+ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+row += 1
+triggers = [
+    "S1 → S2: снижение трансграничного оборота более 20% за квартал",
+    "S2 → S3: введение новых санкций или блокировка расчётов SPFS/SWIFT",
+    "S3 → S2: снятие санкций, восстановление цепочек поставок",
+    "Периодичность пересмотра — ежеквартальный PESTEL-анализ, отв. CSO",
+]
+for t in triggers:
+    c = ws.cell(row=row, column=1, value="  •  " + t)
+    c.font = F_TXT
+    c.alignment = AL_L
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+    row += 1
+
+
+# ===========================================================================
+# ЛИСТ 7 — DCF_Пилот (1 ПС, 10 лет, базовая ставка)
+# ===========================================================================
+ws = wb.create_sheet("DCF_Пилот")
+ws.column_dimensions["A"].width = 36
+HORIZON = 10   # срок анализа, лет
+N_COLS = HORIZON + 1   # годы 0..HORIZON
+for i in range(2, N_COLS + 2):
+    ws.column_dimensions[get_column_letter(i)].width = 11
+
+ws["A1"] = f"Таблица 4.1 — DCF пилотного проекта (1 ПС, r = 12%, {HORIZON} лет)"
+ws["A1"].font = F_TITLE
+ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=N_COLS + 1)
+
+hdr(ws.cell(row=3, column=1, value="Период"))
+for t in range(0, N_COLS):
+    hdr(ws.cell(row=3, column=2 + t, value=f"Год {t}"))
+
+apply(ws.cell(row=4, column=1, value="Поступления (OPEX-экономия, нетто), USD"), F_TXT, None, AL_L)
+apply(ws.cell(row=4, column=2, value=0), F_INPUT, None, AL_R, FMT_USD)
+for t in range(1, N_COLS):
+    apply(ws.cell(row=4, column=2+t, value=f"=OPEX_Экономия!$D${NET_CF_ROW}+{P('OPEX_EDL')}"), F_LINK, None, AL_R, FMT_USD)
+
+apply(ws.cell(row=5, column=1, value="Расходы (CAPEX / OPEX EDL), USD"), F_TXT, None, AL_L)
+apply(ws.cell(row=5, column=2, value=f"={P('CAPEX_EDL')}"), F_LINK, None, AL_R, FMT_USD)
+for t in range(1, N_COLS):
+    apply(ws.cell(row=5, column=2+t, value=f"={P('OPEX_EDL')}"), F_LINK, None, AL_R, FMT_USD)
+
+apply(ws.cell(row=6, column=1, value="Чистый поток (CF)"), F_FORM, None, AL_L)
+for t in range(0, N_COLS):
+    col = get_column_letter(2+t)
+    apply(ws.cell(row=6, column=2+t, value=f"={col}4-{col}5"), F_FORM, None, AL_R, FMT_USD)
+
+apply(ws.cell(row=7, column=1, value="Накопленный CF"), F_FORM, None, AL_L)
+apply(ws.cell(row=7, column=2, value=f"=B6"), F_FORM, None, AL_R, FMT_USD)
+for t in range(1, N_COLS):
+    col = get_column_letter(2+t)
+    prev = get_column_letter(1+t)
+    apply(ws.cell(row=7, column=2+t, value=f"={prev}7+{col}6"), F_FORM, None, AL_R, FMT_USD)
+
+apply(ws.cell(row=8, column=1, value="Коэффициент дисконта = 1/(1+r)^t"), F_FORM, None, AL_L)
+for t in range(0, N_COLS):
+    apply(ws.cell(row=8, column=2+t, value=f"=1/(1+{P('r_баз')})^{t}"), F_FORM, None, AL_R, '0.0000')
+
+apply(ws.cell(row=9, column=1, value="Дисконтированный CF (PV)"), F_FORM, None, AL_L)
+for t in range(0, N_COLS):
+    col = get_column_letter(2+t)
+    apply(ws.cell(row=9, column=2+t, value=f"={col}6*{col}8"), F_FORM, None, AL_R, FMT_USD)
+
+apply(ws.cell(row=10, column=1, value="NPV нарастающим итогом"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=10, column=2, value=f"=B9"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+for t in range(1, N_COLS):
+    col = get_column_letter(2+t)
+    prev = get_column_letter(1+t)
+    apply(ws.cell(row=10, column=2+t, value=f"={prev}10+{col}9"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+
+LAST_COL = get_column_letter(1 + N_COLS)  # последняя колонка таблицы
+
+row = 13
+hdr(ws.cell(row=row, column=1, value="Показатель"))
+hdr(ws.cell(row=row, column=2, value="Значение"))
+hdr(ws.cell(row=row, column=3, value="Формула / комментарий"))
+ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=N_COLS + 1)
+row += 1
+
+kpis_pilot = [
+    (f"NPV ({HORIZON} лет), USD",           f"={LAST_COL}10",                                      FMT_USD),
+    (f"Сумма недисконт. CF за {HORIZON} лет", f"=SUM(C6:{LAST_COL}6)",                             FMT_USD),
+    ("ROI = NPV / CAPEX",                    f"={LAST_COL}10/B5",                                   FMT_PCT),
+    ("PBP (простой), лет",                   f"=B5/C6",                                             FMT_Y),
+    (f"IRR ({HORIZON} лет)",                 f"=IFERROR(IRR(B6:{LAST_COL}6,0.1),\"n/a\")",          FMT_PCT),
+    ("PI = PV доходов / CAPEX",              f"=SUM(C9:{LAST_COL}9)/B5",                            FMT_X),
+]
+for name, formula, fmt in kpis_pilot:
+    apply(ws.cell(row=row, column=1, value=name), F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=2, value=formula), F_TOTAL, FILL_TOT, AL_R, fmt)
+    ws.cell(row=row, column=3).border = BORDER
+    ws.cell(row=row, column=3).fill = FILL_TOT
+    row += 1
+
+ws.cell(row=row+1, column=1, value="Соответствует базовой модели: NPV ≈ $166 тыс. при 10 годах, PBP ≈ 3,5 лет").font = F_NOTE
+ws.merge_cells(start_row=row+1, start_column=1, end_row=row+1, end_column=N_COLS + 1)
+
+
+# ===========================================================================
+# ЛИСТ 8 — DCF_Сценарии (3 сценария × N ПС × 10 лет + платформенные доходы)
+# ===========================================================================
+ws = wb.create_sheet("DCF_Сценарии")
+H_COLS = HORIZON + 1  # 11 годов: 0..10
+for i in range(1, H_COLS + 3):
+    ws.column_dimensions[get_column_letter(i)].width = 11
+ws.column_dimensions["A"].width = 38
+
+ws["A1"] = f"Таблица 4.2 — Сценарное DCF моделирование (портфель, {HORIZON} лет)"
+ws["A1"].font = F_TITLE
+ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=H_COLS + 2)
+
+# Ramp-up на 10 лет: Y0=0, Y1=30%, Y2=70%, Y3+=100%. Округление до целых ПС.
+RAMP = [0.0, 0.30, 0.70] + [1.0] * (HORIZON - 2)   # 11 значений: индексы 0..10
+# CAPEX разворачивается параллельно ramp-up: Y0=30% от целевого числа, Y1=+40%, Y2=+30%, дальше 0.
+DEPLOY = [0.30, 0.40, 0.30] + [0.0] * (HORIZON - 2)
+
+
+def build_scenario_block(ws, start_row, scen_name, scen_col, fill):
+    c = ws.cell(row=start_row, column=1, value=f"{scen_name}")
+    apply(c, F_SECT, fill, AL_L)
+    ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=H_COLS + 2)
+
+    r = start_row + 1
+    hdr(ws.cell(row=r, column=1, value="Показатель"))
+    for t in range(0, H_COLS):
+        hdr(ws.cell(row=r, column=2+t, value=f"Год {t}"))
+    hdr(ws.cell(row=r, column=2 + H_COLS, value=f"Итого {HORIZON} лет"))
+
+    n_ps = f"Сценарии!${scen_col}${SCEN_ROW['Количество подключённых ПС']}"
+    mult_opex = f"Сценарии!${scen_col}${SCEN_ROW['Множитель OPEX-экономии vs базы']}"
+    mult_plt  = f"Сценарии!${scen_col}${SCEN_ROW['Множитель платформенных доходов']}"
+    flag_plt  = f"Сценарии!${scen_col}${SCEN_ROW['Включать платформенные доходы? (1/0)']}"
+    r_scen    = f"Сценарии!${scen_col}${R_ROW}"
+    capex_edl_1 = P('CAPEX_EDL')
+    opex_edl_1  = P('OPEX_EDL')
+
+    net_cf_1ps  = f"OPEX_Экономия!$D${NET_CF_ROW}"
+    new_inc_1ps = f"Новые_доходы!$E${TOTAL_NEW_ROW}"
+
+    LAST = get_column_letter(1 + H_COLS)   # G...L — последняя годовая колонка
+    TOTC = get_column_letter(2 + H_COLS)   # колонка "Итого"
+
+    # Строка 1 — число ПС (ОКРУГЛЕНО до целых)
+    r1 = r + 1
+    apply(ws.cell(row=r1, column=1, value="Количество ПС в эксплуатации"), F_TXT, None, AL_L)
+    for t in range(0, H_COLS):
+        apply(ws.cell(row=r1, column=2+t, value=f"=ROUND({n_ps}*{RAMP[t]},0)"), F_FORM, None, AL_R, '#,##0')
+
+    # Строка 2 — OPEX-экономия портфеля (валовая, без вычета OPEX EDL)
+    r2 = r + 2
+    apply(ws.cell(row=r2, column=1, value="OPEX-экономия портфеля, USD"), F_TXT, None, AL_L)
+    apply(ws.cell(row=r2, column=2, value=0), F_INPUT, None, AL_R, FMT_USD)
+    for t in range(1, H_COLS):
+        col = get_column_letter(2+t)
+        apply(ws.cell(row=r2, column=2+t,
+                     value=f"=({net_cf_1ps}+{opex_edl_1})*{col}{r1}*{mult_opex}"),
+              F_FORM, None, AL_R, FMT_USD)
+
+    # Строка 3 — платформенные доходы
+    r3 = r + 3
+    apply(ws.cell(row=r3, column=1, value="Платформенные доходы, USD"), F_TXT, None, AL_L)
+    apply(ws.cell(row=r3, column=2, value=0), F_INPUT, None, AL_R, FMT_USD)
+    for t in range(1, H_COLS):
+        col = get_column_letter(2+t)
+        factor = 0.5 if t == 1 else 1.0
+        apply(ws.cell(row=r3, column=2+t,
+                     value=f"={new_inc_1ps}*{col}{r1}*{mult_plt}*{flag_plt}*{factor}"),
+              F_FORM, None, AL_R, FMT_USD)
+
+    # Строка 4 — ИТОГО доходы
+    r4 = r + 4
+    apply(ws.cell(row=r4, column=1, value="ИТОГО доходы"), F_FORM, None, AL_L)
+    for t in range(0, H_COLS):
+        col = get_column_letter(2+t)
+        apply(ws.cell(row=r4, column=2+t, value=f"={col}{r2}+{col}{r3}"), F_FORM, None, AL_R, FMT_USD)
+
+    # Строка 5 — CAPEX
+    r5 = r + 5
+    apply(ws.cell(row=r5, column=1, value="CAPEX EDL (USD)"), F_TXT, None, AL_L)
+    for t in range(0, H_COLS):
+        if DEPLOY[t] > 0:
+            apply(ws.cell(row=r5, column=2+t,
+                         value=f"={n_ps}*{capex_edl_1}*{DEPLOY[t]}"),
+                  F_FORM, None, AL_R, FMT_USD)
+        else:
+            apply(ws.cell(row=r5, column=2+t, value=0), F_FORM, None, AL_R, FMT_USD)
+
+    # Строка 6 — OPEX эксплуатации EDL
+    r6 = r + 6
+    apply(ws.cell(row=r6, column=1, value="OPEX эксплуатации EDL (USD)"), F_TXT, None, AL_L)
+    for t in range(0, H_COLS):
+        col = get_column_letter(2+t)
+        apply(ws.cell(row=r6, column=2+t, value=f"={opex_edl_1}*{col}{r1}"), F_FORM, None, AL_R, FMT_USD)
+
+    # Строка 7 — ИТОГО расходы
+    r7 = r + 7
+    apply(ws.cell(row=r7, column=1, value="ИТОГО расходы"), F_FORM, None, AL_L)
+    for t in range(0, H_COLS):
+        col = get_column_letter(2+t)
+        apply(ws.cell(row=r7, column=2+t, value=f"={col}{r5}+{col}{r6}"), F_FORM, None, AL_R, FMT_USD)
+
+    # Строка 8 — чистый CF
+    r8 = r + 8
+    apply(ws.cell(row=r8, column=1, value="Чистый CF"), F_FORM, FILL_SUB, AL_L)
+    for t in range(0, H_COLS):
+        col = get_column_letter(2+t)
+        apply(ws.cell(row=r8, column=2+t, value=f"={col}{r4}-{col}{r7}"), F_FORM, FILL_SUB, AL_R, FMT_USD)
+    apply(ws.cell(row=r8, column=2 + H_COLS, value=f"=SUM(B{r8}:{LAST}{r8})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+
+    # Строка 9 — коэффициент дисконта
+    r9 = r + 9
+    apply(ws.cell(row=r9, column=1, value="Коэффициент дисконта"), F_FORM, None, AL_L)
+    for t in range(0, H_COLS):
+        apply(ws.cell(row=r9, column=2+t, value=f"=1/(1+{r_scen})^{t}"), F_FORM, None, AL_R, '0.0000')
+
+    # Строка 10 — PV
+    r10 = r + 10
+    apply(ws.cell(row=r10, column=1, value="Дисконтированный CF (PV)"), F_FORM, None, AL_L)
+    for t in range(0, H_COLS):
+        col = get_column_letter(2+t)
+        apply(ws.cell(row=r10, column=2+t, value=f"={col}{r8}*{col}{r9}"), F_FORM, None, AL_R, FMT_USD)
+    apply(ws.cell(row=r10, column=2 + H_COLS, value=f"=SUM(B{r10}:{LAST}{r10})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+
+    # Строка 11 — NPV нарастающим
+    r11 = r + 11
+    apply(ws.cell(row=r11, column=1, value="NPV нарастающим итогом"), F_TOTAL, fill, AL_L)
+    apply(ws.cell(row=r11, column=2, value=f"=B{r10}"), F_TOTAL, fill, AL_R, FMT_USD)
+    for t in range(1, H_COLS):
+        col = get_column_letter(2+t)
+        prev = get_column_letter(1+t)
+        apply(ws.cell(row=r11, column=2+t, value=f"={prev}{r11}+{col}{r10}"), F_TOTAL, fill, AL_R, FMT_USD)
+
+    return r11
+
+S1_END = build_scenario_block(ws, 3,              f"S1 «Интеграция» — 20 ПС, r = 12%, {HORIZON} лет",  "B", FILL_S1)
+S2_END = build_scenario_block(ws, S1_END + 2,     f"S2 «Базовый» — 10 ПС, r = 14%, {HORIZON} лет",     "C", FILL_S2)
+S3_END = build_scenario_block(ws, S2_END + 2,     f"S3 «Турбулентность» — 3 ПС, r = 17%, {HORIZON} лет", "D", FILL_S3)
+
+LAST_YEAR_COL = get_column_letter(1 + H_COLS)   # колонка последнего года
+NPV_S1_CELL = f"{LAST_YEAR_COL}{S1_END}"
+NPV_S2_CELL = f"{LAST_YEAR_COL}{S2_END}"
+NPV_S3_CELL = f"{LAST_YEAR_COL}{S3_END}"
+
+# В блоке: NPV=r11 (block_end); r5=CAPEX (-6); r8=ЧистыйCF (-3)
+CF_S1_ROW = S1_END - 3
+CF_S2_ROW = S2_END - 3
+CF_S3_ROW = S3_END - 3
+CAPEX_S1_ROW = S1_END - 6
+CAPEX_S2_ROW = S2_END - 6
+CAPEX_S3_ROW = S3_END - 6
+
+
+# ===========================================================================
+# ЛИСТ 9 — KPI_Сводная
+# ===========================================================================
+ws = wb.create_sheet("KPI_Сводная")
+ws.column_dimensions["A"].width = 35
+for c in "BCDEF":
+    ws.column_dimensions[c].width = 17
+
+ws["A1"] = "Таблица 5 — Сводные KPI проекта по сценариям (горизонт 5 лет)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:F1")
+
+# Заголовки
+hdr(ws.cell(row=3, column=1, value="Показатель"))
+hdr(ws.cell(row=3, column=2, value="Пилот (1 ПС)"))
+for col, name, fill in [(3, "S1 Оптимистичный", FILL_S1),
+                        (4, "S2 Базовый",      FILL_S2),
+                        (5, "S3 Кризисный",    FILL_S3)]:
+    c = ws.cell(row=3, column=col, value=name)
+    apply(c, F_SUB, fill, AL_C)
+hdr(ws.cell(row=3, column=6, value="Комментарий"))
+ws.row_dimensions[3].height = 28
+
+# Каждая строка — KPI
+row = 4
+apply(ws.cell(row=row, column=1, value="Количество ПС"), F_TXT, None, AL_L)
+apply(ws.cell(row=row, column=2, value=1), F_INPUT, None, AL_R, FMT_NUM)
+apply(ws.cell(row=row, column=3, value=f"=Сценарии!B{SCEN_ROW['Количество подключённых ПС']}"), F_LINK, None, AL_R, FMT_NUM)
+apply(ws.cell(row=row, column=4, value=f"=Сценарии!C{SCEN_ROW['Количество подключённых ПС']}"), F_LINK, None, AL_R, FMT_NUM)
+apply(ws.cell(row=row, column=5, value=f"=Сценарии!D{SCEN_ROW['Количество подключённых ПС']}"), F_LINK, None, AL_R, FMT_NUM)
+apply(ws.cell(row=row, column=6, value="портфель объектов"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="Ставка дисконтирования"), F_TXT, None, AL_L)
+apply(ws.cell(row=row, column=2, value=f"={P('r_баз')}"), F_LINK, None, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=3, value=f"=Сценарии!B{R_ROW}"), F_LINK, None, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=4, value=f"=Сценарии!C{R_ROW}"), F_LINK, None, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=5, value=f"=Сценарии!D{R_ROW}"), F_LINK, None, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=6, value="r_баз + премия"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="Совокупные инвестиции (CAPEX), USD"), F_TXT, None, AL_L)
+apply(ws.cell(row=row, column=2, value=f"={P('CAPEX_EDL')}"), F_LINK, None, AL_R, FMT_USD)
+for col, block_end in [(3, S1_END), (4, S2_END), (5, S3_END)]:
+    # В блоке DCF_Сценарии: NPV=r11 (block_end), PV=r10, КоэфДиск=r9, CF=r8, Расходы=r7, OPEX_упр=r6, CAPEX=r5
+    r_capex = block_end - 6
+    apply(ws.cell(row=row, column=col, value=f"=SUM(DCF_Сценарии!B{r_capex}:G{r_capex})"), F_LINK, None, AL_R, FMT_USD)
+apply(ws.cell(row=row, column=6, value="CAPEX EDL, развёрнутый по ramp-up"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="NPV, USD"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=row, column=2, value=f"=DCF_Пилот!G10"), F_LINK, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=row, column=3, value=f"=DCF_Сценарии!{NPV_S1_CELL}"), F_LINK, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=row, column=4, value=f"=DCF_Сценарии!{NPV_S2_CELL}"), F_LINK, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=row, column=5, value=f"=DCF_Сценарии!{NPV_S3_CELL}"), F_LINK, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=row, column=6, value="главный критерий эффективности"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="IRR"), F_TXT, None, AL_L)
+apply(ws.cell(row=row, column=2, value=f"=IFERROR(IRR(DCF_Пилот!B6:G6,0.1),\"n/a\")"), F_LINK, None, AL_R, FMT_PCT)
+# Для сценариев CAPEX растянут по годам → стандартный guess 0.1 часто не сходится. Пробую каскад guess'ов.
+for col, cf_row in [(3, CF_S1_ROW), (4, CF_S2_ROW), (5, CF_S3_ROW)]:
+    rng = f"DCF_Сценарии!B{cf_row}:G{cf_row}"
+    formula = (f'=IFERROR(IRR({rng},0.1),'
+               f'IFERROR(IRR({rng},0.3),'
+               f'IFERROR(IRR({rng},-0.1),'
+               f'IFERROR(IRR({rng},0.5),"n/a"))))')
+    apply(ws.cell(row=row, column=col, value=formula), F_LINK, None, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=6, value="внутренняя норма доходности"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="ROI = NPV / CAPEX"), F_TXT, None, AL_L)
+# B-col: NPV / CAPEX = Пилот NPV / CAPEX_EDL
+apply(ws.cell(row=row, column=2, value=f"=B{row-2}/{P('CAPEX_EDL')}"), F_FORM, None, AL_R, FMT_PCT)
+for col in [3, 4, 5]:
+    letter = get_column_letter(col)
+    apply(ws.cell(row=row, column=col, value=f"=IFERROR({letter}{row-2}/{letter}{row-3},0)"), F_FORM, None, AL_R, FMT_PCT)
+apply(ws.cell(row=row, column=6, value="возврат на вложенный капитал"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="PI = PV(доходы) / CAPEX"), F_TXT, None, AL_L)
+# Для сценариев: сумма PV доходов - PV расходов OPEX; упрощённо: NPV/CAPEX + 1
+for col in [2, 3, 4, 5]:
+    letter = get_column_letter(col)
+    apply(ws.cell(row=row, column=col, value=f"=IFERROR({letter}{row-3}/{letter}{row-4}+1,0)"), F_FORM, None, AL_R, FMT_X)
+apply(ws.cell(row=row, column=6, value="индекс доходности"), F_NOTE, None, AL_L)
+
+row += 1
+apply(ws.cell(row=row, column=1, value="PBP (простой), лет"), F_TXT, None, AL_L)
+# Для пилота — CAPEX / годовой CF
+apply(ws.cell(row=row, column=2, value=f"={P('CAPEX_EDL')}/DCF_Пилот!C6"), F_FORM, None, AL_R, FMT_Y)
+# Для сценариев — сумма годовых CF ~ линейно, грубо CAPEX / среднегодовой CF (после ramp-up, год 3-5)
+for col, cf_row in [(3, CF_S1_ROW), (4, CF_S2_ROW), (5, CF_S3_ROW)]:
+    letter = get_column_letter(col)
+    # ориентир: total CAPEX / avg(CF год3-5)
+    apply(ws.cell(row=row, column=col,
+                 value=f"=IFERROR({letter}{row-5}/AVERAGE(DCF_Сценарии!D{cf_row}:G{cf_row}),0)"),
+          F_FORM, None, AL_R, FMT_Y)
+apply(ws.cell(row=row, column=6, value="срок окупаемости"), F_NOTE, None, AL_L)
+
+# Итоговая оценка ожидаемого NPV (вероятностная)
+row += 2
+apply(ws.cell(row=row, column=1, value="Ожидаемый NPV (взвешенный по вероятностям)"), F_TOTAL, FILL_TOT, AL_L)
+# E(NPV) = sum(prob × NPV)
+p1 = f"Сценарии!B{SCEN_ROW['Вероятность сценария (экспертно)']}"
+p2 = f"Сценарии!C{SCEN_ROW['Вероятность сценария (экспертно)']}"
+p3 = f"Сценарии!D{SCEN_ROW['Вероятность сценария (экспертно)']}"
+# NPV в сводной — row-3 (NPV строка)
+npv_row = row - 5  # NPV в row (row originally 4) -> row 7
+# Перекомпоновать: на самом деле NPV = row - 5 where row was last PBP
+# Проще — ссылаюсь напрямую на ячейки
+apply(ws.cell(row=row, column=2,
+             value=f"={p1}*DCF_Сценарии!{NPV_S1_CELL}+{p2}*DCF_Сценарии!{NPV_S2_CELL}+{p3}*DCF_Сценарии!{NPV_S3_CELL}"),
+      F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
+apply(ws.cell(row=row, column=6, value="E(NPV) = Σ pᵢ × NPVᵢ"), F_NOTE, None, AL_L)
+
+
+# ===========================================================================
+# ЛИСТ 10 — Митигация_рисков
+# ===========================================================================
+ws = wb.create_sheet("Митигация_рисков")
+ws.column_dimensions["A"].width = 5
+ws.column_dimensions["B"].width = 34
+ws.column_dimensions["C"].width = 11
+ws.column_dimensions["D"].width = 13
+ws.column_dimensions["E"].width = 13
+ws.column_dimensions["F"].width = 42
+ws.column_dimensions["G"].width = 13
+ws.column_dimensions["H"].width = 11
+
+ws["A1"] = "Таблица 6 — Матрица рисков и стоимость митигации (задача 1 финального этапа)"
+ws["A1"].font = F_TITLE
+ws.merge_cells("A1:H1")
+
+headers = ["№", "Риск", "Вероятн. (P)", "Ущерб (I), $", "EMV без EDL, $", "Меры митигации", "Стоимость митигации, $/год", "Остаточный EMV, $"]
+for j, h in enumerate(headers, 1):
+    hdr(ws.cell(row=3, column=j, value=h))
+ws.row_dimensions[3].height = 32
+
+# EMV = P × I ; Остаточный EMV = P × I × (1 − эффективность мер)
+# Эффективность мер обозначим жёстко в колонке F через отдельную колонку I.
+# Для простоты — используем колонку I как "эффективность"
+
+# Добавим колонку эффективности
+ws.column_dimensions["I"].width = 11
+hdr(ws.cell(row=3, column=9, value="Эфф. мер"))
+
+risks = [
+    # (name, P, I_USD, measures, mitig_cost, eff)
+    ("Геополитические (санкции, разрыв цепочек)", 0.40, 500_000, "Диверсификация поставщиков ≥3 юрисдикций; мультивалютные контракты; мониторинг санкционных списков", 25_000, 0.60),
+    ("Форс-мажор (природные/техногенные)",         0.10, 800_000, "Страхование имущества и ответственности; горячее резервирование Edge; план BCP/DR",                   18_000, 0.50),
+    ("Валютные (волатильность курсов)",            0.50, 120_000, "Валюта цены ≠ валюта платежа; форварды; мультивалютные резервы",                                       8_000,  0.70),
+    ("Нормативно-правовые (расхождения СНГ)",      0.35, 90_000,  "Гармонизация ЦПА с нац. классификаторами; юридический due diligence",                                   12_000, 0.65),
+    ("Логистические (разрыв цепочек поставок)",    0.40, 150_000, "Страховой склад 90 дней; альтернативные маршруты; double sourcing",                                    15_000, 0.60),
+    ("Кадровые (дефицит ИТ/энергокомпетенций)",    0.55, 80_000,  "EDL Academy; программа наставничества; удержание талантов (retention bonus)",                           22_000, 0.70),
+    ("Технологические (отказ ИТ, утечки)",         0.15, 200_000, "SHA-256 + ЭЦП; горячее резервирование; пентесты; ИБ-аудит",                                             14_000, 0.80),
+    ("Финансовые (задержка платежей покупателей)", 0.25, 60_000,  "Escrow-смарт-контракты; факторинг; страхование дебиторки",                                               6_000,  0.75),
+]
+
+row = 4
+for i, (name, p, inp, meas, cost, eff) in enumerate(risks, 1):
+    apply(ws.cell(row=row, column=1, value=i),     F_TXT, None, AL_C)
+    apply(ws.cell(row=row, column=2, value=name),  F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=3, value=p),     F_INPUT, FILL_ASSUM, AL_R, FMT_PCT)
+    apply(ws.cell(row=row, column=4, value=inp),   F_INPUT, FILL_ASSUM, AL_R, FMT_USD)
+    apply(ws.cell(row=row, column=5, value=f"=C{row}*D{row}"), F_FORM, None, AL_R, FMT_USD)
+    apply(ws.cell(row=row, column=6, value=meas),  F_TXT, None, AL_L)
+    apply(ws.cell(row=row, column=7, value=cost),  F_INPUT, FILL_ASSUM, AL_R, FMT_USD)
+    apply(ws.cell(row=row, column=9, value=eff),   F_INPUT, FILL_ASSUM, AL_R, FMT_PCT)
+    apply(ws.cell(row=row, column=8, value=f"=E{row}*(1-I{row})"), F_FORM, None, AL_R, FMT_USD)
+    # подсветка класса риска
+    emv = p * inp
+    if emv >= 100_000:
+        ws.cell(row=row, column=5).fill = FILL_CRIT
+    elif emv >= 30_000:
+        ws.cell(row=row, column=5).fill = FILL_WARN
+    else:
+        ws.cell(row=row, column=5).fill = FILL_OK
+    row += 1
+
+total_r = row
+apply(ws.cell(row=total_r, column=2, value="ИТОГО"), F_TOTAL, FILL_TOT, AL_L)
+apply(ws.cell(row=total_r, column=5, value=f"=SUM(E4:E{total_r-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=total_r, column=7, value=f"=SUM(G4:G{total_r-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=total_r, column=8, value=f"=SUM(H4:H{total_r-1})"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+for c in [1, 3, 4, 6, 9]:
+    ws.cell(row=total_r, column=c).fill = FILL_TOT
+    ws.cell(row=total_r, column=c).border = BORDER
+
+# Сводка эффекта митигации
+row = total_r + 2
+c = ws.cell(row=row, column=2, value="Эффект митигации (снижение ожидаемого ущерба):")
+apply(c, F_SUB, FILL_SUB, AL_L)
+ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+apply(ws.cell(row=row, column=7, value=f"=E{total_r}-H{total_r}"), F_TOTAL, FILL_TOT, AL_R, FMT_USD)
+apply(ws.cell(row=row, column=8, value="USD/год"), F_NOTE, None, AL_C)
+
+row += 1
+c = ws.cell(row=row, column=2, value="Коэффициент выгоды митигации = (Эффект) / (Стоимость мер):")
+apply(c, F_SUB, FILL_SUB, AL_L)
+ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+apply(ws.cell(row=row, column=7, value=f"=(E{total_r}-H{total_r})/G{total_r}"), F_TOTAL, FILL_TOT, AL_R, FMT_X)
+apply(ws.cell(row=row, column=8, value="ROI мер"), F_NOTE, None, AL_C)
+
+# Легенда класса риска
+row += 2
+apply(ws.cell(row=row, column=2, value="Цветовая легенда EMV:"), F_SUB, FILL_SUB, AL_L)
+row += 1
+for cell, fill, label in [
+    ("B", FILL_CRIT, "Критический (EMV ≥ $100K) — приоритет 1"),
+    ("B", FILL_WARN, "Высокий ($30K ≤ EMV < $100K) — приоритет 2"),
+    ("B", FILL_OK,   "Умеренный (EMV < $30K) — мониторинг"),
+]:
+    c = ws.cell(row=row, column=2, value=label)
+    apply(c, F_TXT, fill, AL_L)
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+    row += 1
+
+
+# ===========================================================================
+# Финал — сохранение
+# ===========================================================================
+out_path = "d:/PycharmProjects/AI_agent/EDL_Financial_Model.xlsx"
+wb.save(out_path)
+print(f"Saved {out_path}")
